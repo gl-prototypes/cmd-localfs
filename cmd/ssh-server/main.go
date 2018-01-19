@@ -6,7 +6,7 @@ import (
 	"io"
 	"log"
 	"net"
-	"os"
+	"sync"
 
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
@@ -14,20 +14,21 @@ import (
 	"github.com/docker/docker/api/types/volume"
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/pkg/stdcopy"
-	p9p "github.com/docker/go-p9p"
 	"github.com/gliderlabs/ssh"
+	gossh "golang.org/x/crypto/ssh"
 )
 
-func main() {
-	listener, err := net.Listen("tcp", ":5641")
+func fatal(err error) {
 	if err != nil {
 		panic(err)
 	}
-	go proxy9p(listener)
-	log.Println("starting 9p proxy on port 5641...")
-	defer listener.Close()
+}
 
+func main() {
 	ssh.Handle(func(sess ssh.Session) {
+		listener := startProxy(sess)
+		defer listener.Close()
+
 		_, _, isTty := sess.Pty()
 		cfg := &container.Config{
 			Image:        "alpine",
@@ -43,7 +44,7 @@ func main() {
 				"/mnt": struct{}{},
 			},
 		}
-		status, cleanup, err := dockerRun(cfg, sess)
+		status, cleanup, err := dockerRun(cfg, sess, listener)
 		defer cleanup()
 		if err != nil {
 			fmt.Fprintln(sess, err)
@@ -56,42 +57,66 @@ func main() {
 	log.Fatal(ssh.ListenAndServe(":2222", nil))
 }
 
-func proxy9p(listener net.Listener) {
-	for {
-		c, err := listener.Accept()
-		if err != nil {
-			log.Println("9p: accept:", err)
-			continue
-		}
-		log.Println("proxy: new conn")
-
-		go func(conn net.Conn) {
-			defer conn.Close()
-
-			ctx := context.Background()
-
-			backend, err := net.Dial("tcp", "127.0.0.1:5640")
-			if err != nil {
-				log.Println("9p: dial:", err)
-				return
-			}
-
-			session, err := p9p.NewSession(ctx, backend)
-			if err != nil {
-				log.Println("9p: session:", err)
-				return
-			}
-
-			if err := p9p.ServeConn(ctx, conn, p9p.Dispatch(session)); err != nil {
-				if err != io.EOF {
-					log.Println("9p: serve:", err)
-				}
-			}
-		}(c)
+func startProxy(sess ssh.Session) net.Listener {
+	listener, err := net.Listen("tcp", fmt.Sprintf("%s:0", os.Getenv("9P_HOST"))
+	if err != nil {
+		panic(err)
 	}
+	_, p, err := net.SplitHostPort(listener.Addr().String())
+	if err != nil {
+		panic(err)
+	}
+	log.Printf("starting proxy for %s on port %s...", sess.User(), p)
+
+	go func() {
+
+		for {
+			c, err := listener.Accept()
+			if err != nil {
+				if err == io.EOF {
+					return
+				}
+				log.Println(err)
+				return
+			}
+			log.Println("proxy: connected", c.RemoteAddr())
+
+
+			go func(in net.Conn) {
+				defer in.Close()
+
+				sshConn := sess.Context().Value(ssh.ContextKeyConn).(gossh.Conn)
+				channel, reqs, err := sshConn.OpenChannel("localDirFs", nil)
+				if err != nil {
+					panic(err)
+				}
+				defer channel.Close()
+				go gossh.DiscardRequests(reqs)
+
+				var wg sync.WaitGroup
+				wg.Add(2)
+				go func() {
+					io.Copy(in, channel)
+					wg.Done()
+				}()
+				go func() {
+					io.Copy(channel, in)
+					wg.Done()
+				}()
+				wg.Wait()
+
+			}(c)
+		}
+	}()
+
+	return listener
 }
 
-func dockerRun(cfg *container.Config, sess ssh.Session) (status int64, cleanup func(), err error) {
+func dockerRun(cfg *container.Config, sess ssh.Session, fileserver net.Listener) (status int64, cleanup func(), err error) {
+	h, p, err := net.SplitHostPort(fileserver.Addr().String())
+	if err != nil {
+		panic(err)
+	}
 	docker, err := client.NewEnvClient()
 	if err != nil {
 		panic(err)
@@ -103,8 +128,8 @@ func dockerRun(cfg *container.Config, sess ssh.Session) (status int64, cleanup f
 	v, err := docker.VolumeCreate(ctx, volume.VolumesCreateBody{
 		Driver: "progrium/docker-9p",
 		DriverOpts: map[string]string{
-			"host": os.Getenv("LOCAL9P_HOST"),
-			"port": "5641",
+			"host": h,
+			"port": p,
 		},
 	})
 	if err != nil {

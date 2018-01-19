@@ -11,9 +11,10 @@ import (
 	"os"
 	"os/user"
 	"strings"
+	"time"
 
-	p9p "github.com/docker/go-p9p"
-	"github.com/docker/go-p9p/ufs"
+	p9p "github.com/progrium/go-p9p"
+	"github.com/progrium/go-p9p/ufs"
 
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/terminal"
@@ -41,34 +42,6 @@ func tryDSA(usr *user.User) ssh.Signer {
 		return nil
 	}
 	return signer
-}
-
-func run9p(listener net.Listener, root string) {
-	for {
-		c, err := listener.Accept()
-		if err != nil {
-			log.Println("9p: accept:", err)
-			continue
-		}
-
-		go func(conn net.Conn) {
-			defer conn.Close()
-
-			ctx := context.Background()
-
-			session, err := ufs.NewSession(ctx, root)
-			if err != nil {
-				log.Println("9p: session:", err)
-				return
-			}
-
-			if err := p9p.ServeConn(ctx, conn, p9p.Dispatch(session)); err != nil {
-				if err != io.EOF {
-					log.Println("9p: serve:", err)
-				}
-			}
-		}(c)
-	}
 }
 
 func main() {
@@ -106,12 +79,30 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	listener, err := net.Listen("tcp", ":5640")
-	if err != nil {
-		panic(err)
-	}
-	go run9p(listener, dir)
-	defer listener.Close()
+
+	fsChan := client.HandleChannelOpen("localDirFs")
+	go func() {
+		for newChan := range fsChan {
+			ch, reqs, err := newChan.Accept()
+			if err != nil {
+				panic(err)
+			}
+			go ssh.DiscardRequests(reqs)
+
+			ctx := context.Background()
+			session, err := ufs.NewSession(ctx, dir)
+			if err != nil {
+				log.Println("9p: session:", err)
+				return
+			}
+
+			if err := p9p.ServeConn(ctx, &virtualConn{ch}, p9p.Dispatch(session)); err != nil {
+				if err != io.EOF {
+					log.Println("9p: serve:", err)
+				}
+			}
+		}
+	}()
 
 	session, err := client.NewSession()
 	if err != nil {
@@ -161,54 +152,46 @@ func main() {
 		}
 	}
 
-	// forward := os.Getenv("SSH_REMOTE_FORWARD") // example: localhost:9000->localhost:3000
-	// parts := strings.Split(forward, "->")
-	// if len(parts) == 2 {
-	// 	listenAddr, err := net.ResolveTCPAddr("tcp", parts[0])
-	// 	if err != nil {
-	// 		panic(err)
-	// 	}
-	// 	l, err := client.ListenTCP(listenAddr)
-	// 	if err != nil {
-	// 		panic(err)
-	// 	}
-	// 	go func() {
-	// 		for {
-	// 			ch, err := l.Accept()
-	// 			if err != nil {
-	// 				panic(err)
-	// 			}
-	// 			go func() {
-	// 				c, err := net.Dial("tcp", parts[1])
-	// 				if err != nil {
-	// 					log.Println(err)
-	// 					ch.Close()
-	// 					return
-	// 				}
-	// 				go func() {
-	// 					defer ch.Close()
-	// 					defer c.Close()
-	// 					io.Copy(ch, c)
-	// 				}()
-	// 				go func() {
-	// 					defer ch.Close()
-	// 					defer c.Close()
-	// 					io.Copy(c, ch)
-	// 				}()
-	// 			}()
-	// 		}
-	//
-	// 	}()
-	// }
-
 	if err := session.Wait(); err != nil {
 		if exitErr, ok := err.(*ssh.ExitError); ok {
-			terminal.Restore(0, oldState)
+			//terminal.Restore(0, oldState)
 			os.Exit(exitErr.ExitStatus())
 		} else {
-			terminal.Restore(0, oldState)
+			//terminal.Restore(0, oldState)
 			panic(err)
 		}
 	}
 
+}
+
+type virtualConn struct {
+	ssh.Channel
+}
+
+func (c *virtualConn) LocalAddr() net.Addr {
+	return c
+}
+
+func (c *virtualConn) RemoteAddr() net.Addr {
+	return c
+}
+
+func (c *virtualConn) SetDeadline(t time.Time) error {
+	return nil
+}
+
+func (c *virtualConn) SetReadDeadline(t time.Time) error {
+	return nil
+}
+
+func (c *virtualConn) SetWriteDeadline(t time.Time) error {
+	return nil
+}
+
+func (c *virtualConn) String() string {
+	return ""
+}
+
+func (c *virtualConn) Network() string {
+	return "ssh"
 }
