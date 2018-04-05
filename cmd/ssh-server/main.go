@@ -6,12 +6,14 @@ import (
 	"io"
 	"log"
 	"net"
+	"os"
+	"os/exec"
+	"strings"
 	"sync"
 
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/strslice"
-	"github.com/docker/docker/api/types/volume"
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/pkg/stdcopy"
 	"github.com/gliderlabs/ssh"
@@ -25,6 +27,7 @@ func fatal(err error) {
 }
 
 func main() {
+
 	ssh.Handle(func(sess ssh.Session) {
 		listener := startProxy(sess)
 		defer listener.Close()
@@ -35,14 +38,18 @@ func main() {
 			Cmd:          strslice.StrSlice{"sh"},
 			Env:          sess.Environ(),
 			Tty:          isTty,
+			WorkingDir:   "/local",
 			OpenStdin:    true,
 			AttachStderr: true,
 			AttachStdin:  true,
 			AttachStdout: true,
 			StdinOnce:    true,
 			Volumes: map[string]struct{}{
-				"/mnt": struct{}{},
+				"/local": struct{}{},
 			},
+		}
+		if len(sess.Command()) > 0 {
+			cfg.Cmd = strslice.StrSlice{"sh", "-c", strings.Join(sess.Command(), " ")}
 		}
 		status, cleanup, err := dockerRun(cfg, sess, listener)
 		defer cleanup()
@@ -58,7 +65,7 @@ func main() {
 }
 
 func startProxy(sess ssh.Session) net.Listener {
-	listener, err := net.Listen("tcp", fmt.Sprintf("%s:0", os.Getenv("9P_HOST"))
+	listener, err := net.Listen("tcp", fmt.Sprintf("%s:0", os.Getenv("PROXY_LISTEN")))
 	if err != nil {
 		panic(err)
 	}
@@ -80,7 +87,6 @@ func startProxy(sess ssh.Session) net.Listener {
 				return
 			}
 			log.Println("proxy: connected", c.RemoteAddr())
-
 
 			go func(in net.Conn) {
 				defer in.Close()
@@ -112,8 +118,36 @@ func startProxy(sess ssh.Session) net.Listener {
 	return listener
 }
 
+func mount(name, port, cwd string) {
+	path := fmt.Sprintf("/mnt/sshfs/%s", name)
+	os.MkdirAll(path, 0777)
+	cmd := exec.Command("sh", "-c",
+		fmt.Sprintf("sshfs -o allow_other,default_permissions,follow_symlinks,cache=no,workaround=rename:truncate -o StrictHostKeyChecking=no localfs@localhost:%s %s -p %s", cwd, path, port))
+	out, err := cmd.CombinedOutput()
+	if len(out) > 0 {
+		log.Println(string(out))
+	}
+	if err != nil {
+		log.Println(err)
+	}
+}
+
+func unmount(name string) {
+	path := fmt.Sprintf("/mnt/sshfs/%s", name)
+	cmd := exec.Command("fusermount", "-u", path)
+	out, err := cmd.CombinedOutput()
+	if len(out) > 0 {
+		log.Println(string(out))
+	}
+	if err != nil {
+		log.Println(err)
+	} else {
+		os.RemoveAll(path)
+	}
+}
+
 func dockerRun(cfg *container.Config, sess ssh.Session, fileserver net.Listener) (status int64, cleanup func(), err error) {
-	h, p, err := net.SplitHostPort(fileserver.Addr().String())
+	_, p, err := net.SplitHostPort(fileserver.Addr().String())
 	if err != nil {
 		panic(err)
 	}
@@ -124,23 +158,23 @@ func dockerRun(cfg *container.Config, sess ssh.Session, fileserver net.Listener)
 	status = 255
 	cleanup = func() {}
 	ctx := context.Background()
+	sessID := sess.Context().Value(ssh.ContextKeySessionID).(string)
 
-	v, err := docker.VolumeCreate(ctx, volume.VolumesCreateBody{
-		Driver: "progrium/docker-9p",
-		DriverOpts: map[string]string{
-			"host": h,
-			"port": p,
-		},
-	})
-	if err != nil {
-		return
+	cwd := "/"
+	for _, v := range sess.Environ() {
+		parts := strings.SplitN(v, "=", 2)
+		if parts[0] == "CWD" {
+			cwd = parts[1]
+		}
 	}
+
+	mount(sessID, p, cwd)
 	cleanup = func() {
-		docker.VolumeRemove(ctx, v.Name, true)
+		unmount(sessID)
 	}
 	res, err := docker.ContainerCreate(ctx, cfg, &container.HostConfig{
 		AutoRemove: true,
-		Binds:      []string{fmt.Sprintf("%s:/mnt", v.Name)},
+		Binds:      []string{fmt.Sprintf("/var/sshfs/%s:/local", sessID)},
 	}, nil, "")
 	if err != nil {
 		return
@@ -156,7 +190,7 @@ func dockerRun(cfg *container.Config, sess ssh.Session, fileserver net.Listener)
 		return
 	}
 	cleanup = func() {
-		docker.VolumeRemove(ctx, v.Name, true)
+		unmount(sessID)
 		stream.Close()
 	}
 
