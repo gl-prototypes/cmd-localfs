@@ -3,30 +3,30 @@ Prototype of remote commands with access to local directory
 
 ## Setting up
 
-You need Docker (developed with Docker for Mac).
+You need Docker.
 
 ## Build and run the server
 
 The server daemon needs to run in Docker. You can build and run it with make:
 
 ```
-$ make build run
+$ make build run-server
 ```
 
 ## Running the client
 
 To quickly test, you can connect using `make client`. This is slightly boring since
-you'll always be in this project directory. Build and install the client and use it from ANY directory.
+you'll always be in this project directory. But it made a binary called `cmd-client`
+that you can use from ANY directory.
 
 ```
-$ go install ./cmd/ssh-client/...
-$ ssh-client localhost:2222
+$ ./cmd-client localhost:2222
 ...
 ```
 
 Now try running the server on a remote machine and use the same client with it. It's currently
 hardcoded to always use the `alpine` image as the command environment. This defeats the point
-a little, but isn't the point of this prototype.
+a little, but isn't the main point of *this* prototype.
 
 ## Limitations
 

@@ -1,7 +1,7 @@
 FROM golang:1.9-alpine as builder
 RUN apk add -U git
-COPY ./cmd/ssh-server /go/src/github.com/gl-prototypes/localfs-docker-ssh/cmd/ssh-server
-WORKDIR /go/src/github.com/gl-prototypes/localfs-docker-ssh/cmd/ssh-server
+COPY ./cmd/cmd-server /go/src/github.com/gl-prototypes/cmd-localfs/cmd/cmd-server
+WORKDIR /go/src/github.com/gl-prototypes/cmd-localfs/cmd/cmd-server
 RUN set -ex \
     && go get . \
     && go install .
@@ -9,6 +9,6 @@ RUN set -ex \
 
 FROM alpine:3.6
 RUN apk add -U sshfs
-COPY --from=builder /go/bin/ssh-server .
+COPY --from=builder /go/bin/cmd-server .
 COPY ./data/id_dev .
-CMD ["/ssh-server"]
+CMD ["/cmd-server"]

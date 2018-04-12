@@ -2,7 +2,7 @@
 build:
 	docker build -t cmd-localfs .
 
-run:
+run-server:
 	@docker run --rm -v /var:/mnt alpine sh -c "mkdir -p /mnt/sshfs"
 	docker run -p 2222:2222 \
 		-v /var/run/docker.sock:/var/run/docker.sock \
@@ -11,4 +11,6 @@ run:
 		cmd-localfs
 
 client:
-	go run ./cmd/ssh-client/main.go localhost:2222
+	go get ./cmd/cmd-client
+	go build ./cmd/cmd-client
+	./cmd-client localhost:2222
