@@ -1,0 +1,3 @@
+[submodule "sshfs"]
+	path = sshfs
+	url = git@github.com:jessfraz/sshfs.git
